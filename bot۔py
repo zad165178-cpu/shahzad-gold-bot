@@ -1,0 +1,26 @@
+import time, json, urllib.request
+from datetime import datetime
+BOT_TOKEN = "8527009504:AAG60QbwezSR58mNzqH5CFtF7JPVz1EIkK8
+CHAT_ID = "8513356699"
+def get_price():
+    try:
+        with urllib.request.urlopen("https://api.gold-api.com/price/XAU") as r:
+            return float(json.loads(r.read().decode())['price'])
+    except:
+        return 4350.0
+def send(msg):
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = json.dumps({"chat_id": CHAT_ID, "text": msg}).encode()
+        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+        urllib.request.urlopen(req)
+    except:
+        pass
+print("Bot Start")
+send("✅ بوٹ لائیو ہو گیا ہے شہزاد بھائی")
+while True:
+    price = get_price()
+    if 4180 <= price <= 4210:
+        send(f"🚨 سیل سگنل: {price} | TP: 4165 | SL: 4225")
+        time.sleep(600)
+    time.sleep(60)
