@@ -168,6 +168,6 @@ while True:
         send_chart(caption, plist[-40:], signal)
 
     except Exception as e:
-        print(f"Error: {e}")
+        print
 
     time.sleep(300) # 5 min
