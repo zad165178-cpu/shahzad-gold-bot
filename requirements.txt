@@ -1,1 +1,5 @@
 requests
+python-telegram-bot
+matplotlib
+pandas
+numpy
