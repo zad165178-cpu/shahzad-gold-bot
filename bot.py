@@ -1,91 +1,70 @@
-import requests
+from flask import Flask
+import threading
+import telebot
 import time
-import random
-from datetime import datetime
+import yfinance as yf
 
-# === YOUR SETTINGS ===
-TELEGRAM_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
+# ====== اپنا ڈیٹا یہاں ڈالو ======
+BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
 CHAT_ID = "PASTE_YOUR_CHAT_ID_HERE"
-SCAN_INTERVAL = 300  # 5 Minutes = 300 seconds
+# =================================
 
-def send_telegram(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"}
-    try:
-        requests.post(url, data=data)
-    except:
-        pass
+bot = telebot.TeleBot(BOT_TOKEN)
+app = Flask(__name__)
+
+@app.route('/')
+def home():
+    return "Shahzad Gold Bot is Live - 5 Min Scan Active"
 
 def get_gold_analysis():
-    # Dummy smart analysis - you can connect real TradingView later
-    # For now it gives realistic Gold levels
-    price = 2045 + random.uniform(-5, 5)
-    rsi = random.randint(30, 75)
-    pips = random.randint(25, 80)
-    
-    if rsi < 45:
-        signal = "BUY"
-        sl = price - 4.5
-        tp1 = price + (pips * 0.1)
-        tp2 = price + (pips * 0.15)
-        take = "✅ TRADE LENI HAI"
-    elif rsi > 65:
-        signal = "SELL"
-        sl = price + 4.5
-        tp1 = price - (pips * 0.1)
-        tp2 = price - (pips * 0.15)
-        take = "✅ TRADE LENI HAI"
-    else:
-        signal = "WAIT"
-        sl = price
-        tp1 = price
-        tp2 = price
-        pips = 0
-        take = "❌ TRADE NAHI LENI - MARKET SIDEWAYS HAI"
-
-    return price, signal, pips, sl, tp1, tp2, take, rsi
-
-# START BOT
-send_telegram("🚀 *5-MINUTE ULTIMATE BOT LIVE*\nAb har 5 minute me full update ayega!")
-
-while True:
     try:
-        price, signal, pips, sl, tp1, tp2, take, rsi = get_gold_analysis()
-        now = datetime.now().strftime("%I:%M %p")
+        data = yf.download("GC=F", period="1d", interval="5m")
+        current_price = round(float(data['Close'].iloc[-1]), 2)
+        
+        # سادہ SL/TP لاجک
+        sl_buy = round(current_price - 10, 2)
+        tp1_buy = round(current_price + 8, 2)
+        tp2_buy = round(current_price + 15, 2)
+        
+        sl_sell = round(current_price + 10, 2)
+        tp1_sell = round(current_price - 8, 2)
+        tp2_sell = round(current_price - 15, 2)
 
-        if signal == "WAIT":
-            message = f"""
-⏳ *5-MIN SCAN - {now}*
+        msg = f"""🏆 GOLD 5-MIN SCAN - SHAHZAD BOT
 
-GOLD: {price:.2f}
-RSI: {rsi}
+💰 Current Price: {current_price}
 
-{take}
-Pips: 0
-Reason: RSI {rsi} - No Clear Trend
+🔥 BUY SETUP:
+SL Lagana Hai: {sl_buy}
+TP1: {tp1_buy}
+TP2: {tp2_buy}
+Pips: 80 / 150
 
-Agle 5 min me phir check karunga...
+🔻 SELL SETUP:
+SL Lagana Hai: {sl_sell}
+TP1: {tp1_sell}
+TP2: {tp2_sell}
+Pips: 80 / 150
+
+✅ Status: 24H SCAN ACTIVE (Every 5 Min)
 """
-        else:
-            message = f"""
-🔥 *TRADE SETUP - {now}*
-
-GOLD: {price:.2f} | {signal}
-RSI: {rsi}
-
-{take}
-
-*Pips Target:* {pips} Pips
-*SL Lagana Hai:* {sl:.2f}
-*TP1 (Safe):* {tp1:.2f}
-*TP2 (Full):* {tp2:.2f}
-
-Lot Size: 0.02 - 0.05
-Risk: 2% only!
-"""
-        send_telegram(message)
-
+        return msg
     except Exception as e:
-        print(e)
+        return f"Error: {e}"
 
-    time.sleep(SCAN_INTERVAL)
+def start_bot_loop():
+    while True:
+        try:
+            analysis = get_gold_analysis()
+            bot.send_message(CHAT_ID, analysis)
+        except Exception as e:
+            print(f"Error in loop: {e}")
+        time.sleep(300)  # 300 = 5 منٹ
+
+# Flask کو الگ Thread میں چلانا تاکہ Render Timed Out نہ دے
+threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000)).start()
+# بوٹ کا لوپ الگ Thread میں
+threading.Thread(target=start_bot_loop).start()
+
+if __name__ == "__main__":
+    bot.infinity_polling()
