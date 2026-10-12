@@ -1,136 +1,126 @@
-import os, time, requests, random
+import os, time, requests
 from datetime import datetime
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
-price_history = []
 
-def get_price():
+def get_live():
     try:
-        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", timeout=10)
-        return float(r.json()['price'])
+        r = requests.get("https://api.gold-api.com/price/XAU", timeout=10).json()
+        return float(r['price'])
     except:
-        return 2650.0 + random.uniform(-5, 5)
+        try:
+            r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", timeout=10).json()
+            return float(r['price'])
+        except:
+            return None # Apna rate nahi likhunga
 
-def send(text):
+def get_candles():
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": text})
-        print("Sent")
-    except Exception as e:
-        print(e)
+        url="https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=50"
+        d=requests.get(url,timeout=10).json()
+        return [float(c[4]) for c in d]
+    except:
+        return None
 
-def ema(prices, p):
-    return sum(prices[-p:]) / p if len(prices) >= p else sum(prices)/len(prices)
+def send(t):
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id":CHAT_ID,"text":t})
+    except: pass
 
-def rsi_calc(prices, period=14):
-    if len(prices) < period+1: return 50
-    gains=0; losses=0
-    for i in range(-period,0):
-        d = prices[i] - prices[i-1]
-        if d>0: gains+=d
-        else: losses+=abs(d)
-    if losses==0: return 70
-    rs=gains/losses if losses!=0 else 1
-    return 100 - (100/(1+rs))
+def ema(p,n): return sum(p[-n:])/n
+def rsi(p,per=14):
+    if len(p)<per+1: return 50
+    g=l=0
+    for i in range(-per,0):
+        d=p[i]-p[i-1]
+        if d>0: g+=d
+        else: l+=abs(d)
+    if l==0: return 70
+    return 100-(100/(1+g/l))
 
-def check_news():
-    # High Impact News Time Check (UTC Time)
-    now = datetime.utcnow()
-    # 12:30, 13:30, 14:00 UTC = US Big News (CPI, NFP, FOMC)
-    # 18:00 UTC = FOMC Evening
-    risky_times = [
-        (12, 30), (13, 30), (14, 0), (18, 0), (18, 30)
-    ]
-    for h, m in risky_times:
-        if now.hour == h and abs(now.minute - m) <= 30:
-            return True, f"HIGH IMPACT NEWS at {h}:{m} UTC"
-    return False, ""
-
-send("GOLD BOT V3 FINAL STARTED - With News Filter + Best Rules")
+send("GOLD V7 FINAL STARTED - Live Only + Full Analysis")
 
 while True:
-    try:
-        is_news, news_name = check_news()
-        price = get_price()
-        price_history.append(price)
-        if len(price_history)>50: price_history.pop(0)
+    live = get_live()
+    closes = get_candles()
 
-        e9 = ema(price_history, 9)
-        e21 = ema(price_history, 21)
-        rsi = rsi_calc(price_history, 14)
+    if live is None or closes is None:
+        send("Live API Fail - 1 min baad phir try karunga, apna rate nahi likhunga")
+        time.sleep(60)
+        continue
 
-        # NEWS FILTER
-        if is_news:
-            msg = f"""
-NEWS ALERT - NO TRADE
+    e9=ema(closes,9); e21=ema(closes,21)
+    rsi_v=rsi(closes,14)
 
-Time: {datetime.utcnow().strftime('%H:%M UTC')}
-News: {news_name}
+    # NEWS CHECK - US Time
+    now=datetime.utcnow()
+    news=False
+    if now.hour in [12,13,18] and now.minute<40:
+        msg=f"""
+NEWS ALERT
 
-Action: DO NOT TAKE ANY TRADE NOW
-Reason: High impact news = SL hunting
+Live Rate: {live:.2f}
+News Time: {now.strftime('%H:%M UTC')} - US News Chal Raha Hai
 
-Wait for next 5 min candle after news
-Current Gold Price: {price:.2f}
-"""
-            send(msg)
-            time.sleep(300)
-            continue
-
-        # BEST CONFIRMATION LOGIC
-        buy_cond = e9 > e21 and rsi > 52 and rsi < 70
-        sell_cond = e9 < e21 and rsi < 48 and rsi > 30
-
-        if buy_cond:
-            signal="BUY"
-            sl=price-5.5; tp1=price+3.5; tp2=price+6.5; tp3=price+11
-            status="BEST TRADE - CONFIRMED BUY"
-        elif sell_cond:
-            signal="SELL"
-            sl=price+5.5; tp1=price-3.5; tp2=price-6.5; tp3=price-11
-            status="BEST TRADE - CONFIRMED SELL"
-        else:
-            msg = f"""
-WAIT - NO TRADE NOW
-
-Price: {price:.2f}
-EMA9: {e9:.2f} | EMA21: {e21:.2f} | RSI: {rsi:.1f}
-News: No News - Market Sideways
-
-Action: DO NOT TRADE - Wait 5 min
-"""
-            send(msg)
-            time.sleep(300)
-            continue
-
-        msg = f"""
-{signal} SIGNAL - V3 FINAL (Best)
-
-Entry: {price:.2f}
-RSI: {rsi:.1f} | EMA: {e9:.2f}/{e21:.2f}
-News Filter: PASSED - No News
-
-SL: {sl:.2f} (55 pips) - MUST USE
-TP1: {tp1:.2f} (35 pips) Close 30%
-TP2: {tp2:.2f} (65 pips) Close 40%
-TP3: {tp3:.2f} (110 pips) Close 30%
-
-Status: {status}
-
---- BEST TRADING RULES (Follow 100%) ---
-1. Always SL - No SL = No Trade
-2. Risk 1% only per trade
-3. After TP1 hit, move SL to Entry
-4. No trade 30 min before/after big news (Bot will auto stop)
-5. 2 Loss in a row = Stop trading today
-6. Take only CONFIRMED trades
-
-Win Rate: 65-70% if you follow rules
-Time: {datetime.utcnow().strftime('%H:%M UTC')}
+Action: ABHI TRADE MAT LO
+Reason: News me market tez hilta hai
 """
         send(msg)
+        time.sleep(1800)
+        continue
 
-    except Exception as e:
-        print(e)
+    # SIDEWAYS CHECK
+    if abs(e9-e21)<1.5 and 45<rsi_v<55:
+        msg=f"""
+SIDEWAYS - TRADE MAT LO
+
+Live Rate: {live:.2f} (Market me abhi yehi chal raha hai)
+EMA9: {e9:.2f} | EMA21: {e21:.2f} | RSI: {rsi_v:.1f}
+
+Market: Sideways hai, upar neeche ho raha hai
+Action: ABHI TRADE NAHI LENI
+"""
+        send(msg)
+        time.sleep(300)
+        continue
+
+    # BUY / SELL
+    if e9>e21 and rsi_v>53 and live>e9:
+        msg=f"""
+BUY SIGNAL - UPAR JAYEGA
+
+Live Rate: {live:.2f} (Yehi rate market me hai)
+Direction: Yahan se UPAR JAYEGA
+
+Entry: {live:.2f}
+SL: {live-6:.2f} (60 pips)
+TP1: {live+3.5:.2f} | TP2: {live+7:.2f} | TP3: {live+12:.2f}
+Condition: UPTREND | News: Nahi | Sideways: Nahi
+Action: BUY LE SAKTE HO
+"""
+    elif e9<e21 and rsi_v<47 and live<e9:
+        msg=f"""
+SELL SIGNAL - NEECHE JAYEGA
+
+Live Rate: {live:.2f} (Yehi rate market me hai)
+Direction: Yahan se NEECHE JAYEGA
+
+Entry: {live:.2f}
+SL: {live+6:.2f} (60 pips)
+TP1: {live-3.5:.2f} | TP2: {live-7:.2f} | TP3: {live-12:.2f}
+Condition: DOWNTREND | News: Nahi | Sideways: Nahi
+Action: SELL LE SAKTE HO
+"""
+    else:
+        msg=f"""
+WAIT - ABHI TRADE MAT LO
+
+Live Rate: {live:.2f}
+EMA: {e9:.2f}/{e21:.2f} | RSI: {rsi_v:.1f}
+Reason: Confirmation nahi hai
+
+Action: WAIT - Agla check 5 min me
+"""
+    send(msg)
     time.sleep(300)
