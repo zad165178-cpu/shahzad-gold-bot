@@ -1,71 +1,86 @@
 import os, time, requests
+from datetime import datetime
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-last_sent = ""
+last_signal = ""
 
-def get_live_price():
+def get_live():
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", headers=headers, timeout=10).json()
-        return float(r['items'][0]['xauPrice'])
-    except:
-        try:
-            r = requests.get("https://api.gold-api.com/price/XAU", headers=headers, timeout=10).json()
-            return float(r['price'])
-        except:
-            try:
-                r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", headers=headers, timeout=10).json()
-                return float(r['price'])
-            except:
-                return None
+        r = requests.get("https://data-asg.goldprice.org/dbXRates/USD", headers=headers, timeout=12).json()
+        p = float(r['items'][0]['xauPrice'])
+        if p > 3000: return p
+    except: pass
+    try:
+        r = requests.get("https://api.gold-api.com/price/XAU", headers=headers, timeout=12).json()
+        return float(r['price'])
+    except: pass
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=PAXGUSDT", headers=headers, timeout=12).json()
+        return float(r['price'])
+    except: pass
+    return None
 
 def get_candles():
     try:
-        url="https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=1m&limit=50"
-        d=requests.get(url,timeout=10).json()
+        url = "https://api.binance.com/api/v3/klines?symbol=PAXGUSDT&interval=5m&limit=100"
+        d = requests.get(url, timeout=12).json()
         return [float(c[4]) for c in d]
     except:
         return None
 
 def send(t):
-    requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id":CHAT_ID,"text":t})
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", data={"chat_id": CHAT_ID, "text": t}, timeout=12)
+    except: pass
 
-def ema(p,n): return sum(p[-n:])/n
+def ema(arr, n): return sum(arr[-n:]) / n
 
-def rsi(p,per=14):
-    if len(p)<per+1: return 50
-    g=l=0
-    for i in range(-per,0):
-        d=p[i]-p[i-1]
-        if d>0: g+=d
-        else: l+=abs(d)
-    if l==0: return 70
-    return 100-(100/(1+g/l))
+def rsi(arr, per=14):
+    if len(arr) < per+1: return 50
+    g = l = 0
+    for i in range(-per, 0):
+        diff = arr[i] - arr[i-1]
+        if diff > 0: g += diff
+        else: l += abs(diff)
+    if l == 0: return 70
+    rs = g / l
+    return 100 - (100 / (1 + rs))
 
-send("GOLD BOT V10 - ENGLISH ONLY - LIVE PRICE - STARTED")
+send("GOLD BOT V30 - 10 MIN MODE STARTED")
 
 while True:
-    live = get_live_price()
-    closes = get_candles()
-    if live is None or closes is None:
-        time.sleep(30)
+    live = get_live()
+    candles = get_candles()
+
+    if live is None or candles is None:
+        print("API fail, silent retry 60 sec")
+        time.sleep(60)
         continue
 
-    e9=ema(closes,9); e21=ema(closes,21); rsi_v=rsi(closes,14)
+    e9 = ema(candles, 9)
+    e21 = ema(candles, 21)
+    e50 = ema(candles, 50)
+    r = rsi(candles, 14)
 
-    if abs(e9-e21)<1.5 and 45<rsi_v<55:
-        msg=f"SIDEWAYS MARKET\nLive Price: {live:.2f}\nRSI: {rsi_v:.1f}\nAction: DO NOT TRADE"
-    elif e9>e21 and rsi_v>53:
-        msg=f"BUY SIGNAL\nLive Price: {live:.2f}\nDirection: UP\nEntry: {live:.2f}\nSL: {live-6:.2f} (60 pips)\nTP1: {live+4:.2f} TP2: {live+8:.2f} TP3: {live+12:.2f}"
-    elif e9<e21 and rsi_v<47:
-        msg=f"SELL SIGNAL\nLive Price: {live:.2f}\nDirection: DOWN\nEntry: {live:.2f}\nSL: {live+6:.2f} (60 pips)\nTP1: {live-4:.2f} TP2: {live-8:.2f} TP3: {live-12:.2f}"
+    if abs(e9 - e21) < 2.0 and 46 < r < 54:
+        msg = f"SIDEWAYS - DO NOT TRADE\nLive: {live:.2f}\nRSI: {r:.1f}"
+        sig = "SIDEWAYS"
+    elif e9 > e21 and e21 > e50 and 55 < r < 70:
+        msg = f"BUY SIGNAL - PRICE WILL GO UP\nLive: {live:.2f}\nEntry: {live:.2f}\nSL: {live-6:.2f}\nTP: {live+4:.2f} / {live+8:.2f} / {live+14:.2f}"
+        sig = "BUY"
+    elif e9 < e21 and e21 < e50 and 30 < r < 45:
+        msg = f"SELL SIGNAL - PRICE WILL GO DOWN\nLive: {live:.2f}\nEntry: {live:.2f}\nSL: {live+6:.2f}\nTP: {live-4:.2f} / {live-8:.2f} / {live-14:.2f}"
+        sig = "SELL"
     else:
-        msg=f"WAIT - NO TRADE\nLive Price: {live:.2f}\nEMA9: {e9:.2f} EMA21: {e21:.2f} RSI: {rsi_v:.1f}\nAction: WAIT"
+        msg = f"WAIT - DO NOT TRADE NOW\nLive: {live:.2f}\nEMA: {e9:.2f}/{e21:.2f} RSI: {r:.1f}"
+        sig = "WAIT"
 
-    if msg!= last_sent:
-        send(msg)
-        last_sent = msg
+    if sig!= last_signal or sig in ["BUY", "SELL"]:
+        if sig!= last_signal:
+            send(msg)
+            last_signal = sig
 
-    time.sleep(300)
+    time.sleep(600) # <-- 10 MINUTE FIX
