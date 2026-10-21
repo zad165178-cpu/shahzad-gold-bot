@@ -1,6 +1,6 @@
 
-import json
 import os
+import json
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone
@@ -8,134 +8,166 @@ from datetime import datetime, timezone
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 BALANCE = float(os.environ.get("DEMO_BALANCE", "0"))
+
 RISK_PERCENT = 0.5
 BASE = "https://xaus.com/api/v1"
+MAX_PRICE_AGE = 180
 
 
 def get_json(url):
     req = urllib.request.Request(
-        url, headers={"User-Agent": "GoldSignalBot/1.0"}
+        url,
+        headers={"User-Agent": "ShahzadGoldSignals/2.0"}
     )
     with urllib.request.urlopen(req, timeout=20) as response:
         return json.loads(response.read().decode())
 
 
-def telegram(message):
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = urllib.parse.urlencode({
+    body = urllib.parse.urlencode({
         "chat_id": CHAT_ID,
         "text": message
     }).encode()
-    req = urllib.request.Request(url, data=payload)
+
+    req = urllib.request.Request(url, data=body)
     with urllib.request.urlopen(req, timeout=20) as response:
         result = json.loads(response.read().decode())
         if not result.get("ok"):
-            raise RuntimeError("Telegram rejected the message")
+            raise RuntimeError("Telegram message failed")
 
 
-def live_price():
-    data = get_json(BASE + "/spot?compact=1")
+def get_live_price():
+    # Cache-busting parameter for a freshness-sensitive request
+    url = BASE + "/spot?compact=1&fresh=" + str(
+        int(datetime.now(timezone.utc).timestamp())
+    )
+    data = get_json(url)
+
     state = data.get("data_state", {})
-    price = data.get("spot_usd_oz") or data.get("xau", {}).get("price")
+    if state.get("status") != "fresh":
+        raise ValueError("Spot price is stale or unavailable")
 
-    if not price or state.get("status") != "fresh":
-        raise ValueError("Live price is unavailable or stale")
-
+    price = data.get("spot_usd_oz")
     updated = data.get("updated_at")
-    if updated:
-        stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
-        age = (datetime.now(timezone.utc) - stamp).total_seconds()
-        if age < -60 or age > 600:
-            raise ValueError("Price timestamp is too old")
 
-    return float(price), updated or "Unknown"
+    if not isinstance(price, (int, float)) or price <= 0:
+        raise ValueError("Invalid spot price")
+
+    if not updated:
+        raise ValueError("Price timestamp missing")
+
+    stamp = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+    age = (datetime.now(timezone.utc) - stamp).total_seconds()
+
+    if age < -60 or age > MAX_PRICE_AGE:
+        raise ValueError("Price timestamp is too old")
+
+    return float(price), updated
 
 
-def candles(interval, period):
+def get_candles(interval, period):
     query = urllib.parse.urlencode({
         "symbol": "xau",
         "range": period,
         "interval": interval
     })
     data = get_json(BASE + "/chart?" + query)
-    points = data.get("points", [])
 
     rows = []
-    for p in points:
+    for point in data.get("points", []):
         try:
             rows.append({
-                "t": int(p["t"]),
-                "h": float(p["h"]),
-                "l": float(p["l"]),
-                "c": float(p["c"])
+                "t": int(point["t"]),
+                "o": float(point["o"]),
+                "h": float(point["h"]),
+                "l": float(point["l"]),
+                "c": float(point["c"])
             })
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, ValueError, TypeError):
             continue
 
-    rows.sort(key=lambda x: x["t"])
-    # Do not use a possibly unfinished current candle
+    rows.sort(key=lambda r: r["t"])
+
+    candle_seconds = 900 if interval == "15m" else 3600
     now = datetime.now(timezone.utc).timestamp()
-    seconds = 900 if interval == "15m" else 3600
-    rows = [r for r in rows if r["t"] + seconds <= now]
+
+    # Only use fully closed candles
+    rows = [
+        r for r in rows
+        if r["t"] + candle_seconds <= now
+    ]
+
     if len(rows) < 55:
-        raise ValueError(f"Not enough closed {interval} candles")
+        raise ValueError("Insufficient closed candle data: " + interval)
+
     return rows
 
 
 def ema(values, period):
+    if len(values) < period:
+        raise ValueError("Insufficient EMA data")
+
     alpha = 2 / (period + 1)
     result = sum(values[:period]) / period
-    for v in values[period:]:
-        result = alpha * v + (1 - alpha) * result
+
+    for value in values[period:]:
+        result = alpha * value + (1 - alpha) * result
+
     return result
 
 
-def atr(rows, period=14):
-    tr = []
+def calculate_atr(rows, period=14):
+    ranges = []
+
     for i in range(1, len(rows)):
-        cur, prev = rows[i], rows[i - 1]
-        tr.append(max(
-            cur["h"] - cur["l"],
-            abs(cur["h"] - prev["c"]),
-            abs(cur["l"] - prev["c"])
+        current = rows[i]
+        previous = rows[i - 1]
+
+        ranges.append(max(
+            current["h"] - current["l"],
+            abs(current["h"] - previous["c"]),
+            abs(current["l"] - previous["c"])
         ))
-    if len(tr) < period:
-        raise ValueError("Not enough ATR data")
-    return sum(tr[-period:]) / period
+
+    if len(ranges) < period:
+        raise ValueError("Insufficient ATR data")
+
+    return sum(ranges[-period:]) / period
 
 
 def analyse(interval, period):
-    rows = candles(interval, period)
-    close = [r["c"] for r in rows]
-    e9, e21, e50 = ema(close, 9), ema(close, 21), ema(close, 50)
-    volatility = atr(rows)
+    rows = get_candles(interval, period)
+    closes = [r["c"] for r in rows]
+
+    e9 = ema(closes, 9)
+    e21 = ema(closes, 21)
+    e50 = ema(closes, 50)
+    volatility = calculate_atr(rows)
 
     if volatility <= 0:
         raise ValueError("Invalid ATR")
 
-    if e9 > e21 and close[-1] > e50:
-        signal = "BUY"
-    elif e9 < e21 and close[-1] < e50:
-        signal = "SELL"
+    if e9 > e21 and closes[-1] > e50:
+        direction = "BUY"
+    elif e9 < e21 and closes[-1] < e50:
+        direction = "SELL"
     else:
-        signal = "WAIT"
-
-    entry = close[-1]
-    sl = tp = None
-    if signal == "BUY":
-        sl, tp = entry - 1.5 * volatility, entry + 3 * volatility
-    elif signal == "SELL":
-        sl, tp = entry + 1.5 * volatility, entry - 3 * volatility
+        direction = "WAIT"
 
     return {
-        "signal": signal, "entry": entry,
-        "sl": sl, "tp": tp, "atr": volatility,
-        "time": rows[-1]["t"]
+        "signal": direction,
+        "ema9": e9,
+        "ema21": e21,
+        "ema50": e50,
+        "atr": volatility,
+        "candle_time": rows[-1]["t"]
     }
 
 
-def main():
-    price, updated = live_price()
+def make_signal():
+    # Both chart timeframes and spot must be available
+    spot, updated = get_live_price()
     m15 = analyse("15m", "5d")
     h1 = analyse("1h", "1mo")
 
@@ -144,56 +176,74 @@ def main():
         signal = "WAIT"
 
     lines = [
-        "GOLD SIGNAL BOT | XAU/USD",
+        "SHAHZAD GOLD SIGNALS",
+        "Instrument: XAU/USD",
+        f"Live Spot: ${spot:.2f}",
+        f"Price Timestamp: {updated}",
         "",
-        f"Live Spot Price: ${price:.2f}",
-        f"Price Updated: {updated}",
-        "",
-        f"M15 Signal: {m15['signal']}",
-        f"H1 Signal: {h1['signal']}",
+        f"M15 Trend: {m15['signal']}",
+        f"H1 Trend: {h1['signal']}",
         f"Confirmed Signal: {signal}",
         ""
     ]
 
     if signal in ("BUY", "SELL"):
-        lines += [
-            f"Indicative Entry: {m15['entry']:.2f}",
-            f"Stop Loss: {m15['sl']:.2f}",
-            f"Take Profit: {m15['tp']:.2f}",
+        # Entry is from the same spot feed displayed above.
+        # ATR is derived from the independent chart feed.
+        entry = spot
+        distance = 1.5 * m15["atr"]
+        target_distance = 3.0 * m15["atr"]
+
+        if signal == "BUY":
+            sl = entry - distance
+            tp = entry + target_distance
+        else:
+            sl = entry + distance
+            tp = entry - target_distance
+
+        lines.extend([
+            f"Indicative Entry: ${entry:.2f}",
+            f"Stop Loss: ${sl:.2f}",
+            f"Take Profit: ${tp:.2f}",
             "Risk/Reward: 1:2",
-            f"Risk Setting: {RISK_PERCENT}% per trade"
-        ]
+            f"Risk Setting: {RISK_PERCENT}%",
+            "Entry is an indicative spot price."
+        ])
+
         if BALANCE > 0:
-            lines.append(
-                f"Risk Budget: ${BALANCE * RISK_PERCENT / 100:.2f}"
-            )
+            risk_cash = BALANCE * RISK_PERCENT / 100
+            lines.append(f"Risk Budget: ${risk_cash:.2f}")
+
         lines.append(
-            "Position size not calculated; broker contract details required."
+            "Lot size not calculated; broker contract details required."
         )
     else:
         lines.append("No confirmed setup. Wait for alignment.")
 
-    lines += [
+    lines.extend([
         "",
-        "Data: Independent XAU/USD spot, not Exness Bid/Ask.",
-        "Signals are indicative, not guaranteed.",
-        "Signals only. No trades are placed."
-    ]
+        "WARNING: Independent spot data, NOT Exness Bid/Ask.",
+        "Chart and spot feeds may differ.",
+        "Signals only. No trades are placed.",
+        "No profit or win-rate guarantee."
+    ])
 
-    telegram("\n".join(lines))
+    return "\n".join(lines)
+
+
+def main():
+    try:
+        message = make_signal()
+    except Exception as error:
+        message = (
+            "SHAHZAD GOLD SIGNALS\n"
+            "NO SIGNAL GENERATED\n"
+            f"Reason: {str(error)[:200]}\n"
+            "Check data connection and timestamps."
+        )
+
+    send_telegram(message)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as error:
-        # Never fabricate a price or signal when data fails
-        try:
-            telegram(
-                "GOLD SIGNAL BOT\n"
-                "No signal generated.\n"
-                f"Reason: {str(error)[:250]}\n"
-                "Please check data availability."
-            )
-        except Exception:
-            raise
+    main()
